@@ -1,0 +1,11 @@
+streamlit
+pymilvus
+milvus-lite
+sentence-transformers
+fastapi
+uvicorn
+beautifulsoup4
+lxml
+requests
+langgraph
+python-dotenv
