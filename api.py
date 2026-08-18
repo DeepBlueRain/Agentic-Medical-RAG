@@ -1,6 +1,6 @@
 from functools import lru_cache
 import os
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -29,11 +29,19 @@ class RetrievedDoc(BaseModel):
     abstract: str
 
 
+class WorkflowEvent(BaseModel):
+    step: str
+    status: str
+    detail: str
+    data: Dict[str, Any]
+
+
 class AskResponse(BaseModel):
     query: str
     answer: str
     groundedness: str
     trace: List[str]
+    workflow_events: List[WorkflowEvent]
     latency_seconds: float
     retrieved_docs: List[RetrievedDoc]
 
@@ -94,6 +102,7 @@ def ask(payload: AskRequest):
             answer=result["answer"],
             groundedness=result["groundedness"],
             trace=result["trace"],
+            workflow_events=result["events"],
             latency_seconds=result["latency_seconds"],
             retrieved_docs=retrieved_docs,
         )

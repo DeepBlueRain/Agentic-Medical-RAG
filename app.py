@@ -66,6 +66,14 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
     st.subheader("Agent Trace")
     st.code(" -> ".join(result["trace"]))
 
+    st.subheader("Workflow Details")
+    for index, event in enumerate(result["events"]):
+        label = f"{index + 1}. {event['step']} · {event['status']}"
+        with st.expander(label, expanded=True):
+            st.write(event["detail"])
+            if event["data"]:
+                st.json(event["data"])
+
     st.subheader("Retrieved Context")
     if not result["docs"]:
         st.warning("No retrieved documents.")

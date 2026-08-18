@@ -29,7 +29,7 @@ The workflow is implemented with LangGraph and exposes the following trace nodes
 - Store and retrieve vectors through Milvus Lite with IVF_FLAT indexing.
 - Use a LangGraph workflow to route, retrieve, answer and verify each query.
 - Call an online OpenAI-compatible LLM instead of loading a local generation model.
-- Show retrieved documents, agent trace, groundedness label and latency in Streamlit.
+- Show step-by-step workflow details, retrieved documents, agent trace, groundedness label and latency in Streamlit.
 - Provide an API endpoint for integration and evaluation.
 
 ## Tech Stack
@@ -122,6 +122,7 @@ Example response fields:
 answer
 groundedness
 trace
+workflow_events
 latency_seconds
 retrieved_docs
 ```
