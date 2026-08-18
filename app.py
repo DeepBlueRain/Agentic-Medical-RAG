@@ -66,6 +66,11 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
     st.subheader("Agent Trace")
     st.code(" -> ".join(result["trace"]))
 
+    st.subheader("Retrieved Context")
+    st.write("Query analysis:", result["query_analysis"])
+    st.write("Search queries:", " | ".join(result["search_queries"]))
+    st.write("Evidence quality:", result["evidence_quality"])
+
     st.subheader("Workflow Details")
     for index, event in enumerate(result["events"]):
         label = f"{index + 1}. {event['step']} · {event['status']}"
@@ -74,7 +79,12 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
             if event["data"]:
                 st.json(event["data"])
 
-    st.subheader("Retrieved Context")
+    st.subheader("Selected Evidence")
+    if result["selected_evidence"]:
+        st.json(result["selected_evidence"])
+    else:
+        st.info("No selected evidence.")
+
     if not result["docs"]:
         st.warning("No retrieved documents.")
     for index, doc in enumerate(result["docs"]):

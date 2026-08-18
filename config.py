@@ -31,7 +31,7 @@ INDEX_PARAMS = {"nlist": int(os.getenv("MILVUS_NLIST", "128"))}
 SEARCH_PARAMS = {"nprobe": int(os.getenv("MILVUS_NPROBE", "16"))}
 
 # Generation
-MAX_NEW_TOKENS_GEN = int(os.getenv("MAX_NEW_TOKENS_GEN", "512"))
+MAX_NEW_TOKENS_GEN = int(os.getenv("MAX_NEW_TOKENS_GEN", "256"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
 REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.1"))

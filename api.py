@@ -42,6 +42,11 @@ class AskResponse(BaseModel):
     groundedness: str
     trace: List[str]
     workflow_events: List[WorkflowEvent]
+    route: str
+    query_analysis: Dict[str, Any]
+    search_queries: List[str]
+    evidence_quality: str
+    selected_evidence: List[Dict[str, Any]]
     latency_seconds: float
     retrieved_docs: List[RetrievedDoc]
 
@@ -103,6 +108,11 @@ def ask(payload: AskRequest):
             groundedness=result["groundedness"],
             trace=result["trace"],
             workflow_events=result["events"],
+            route=result["route"],
+            query_analysis=result["query_analysis"],
+            search_queries=result["search_queries"],
+            evidence_quality=result["evidence_quality"],
+            selected_evidence=result["selected_evidence"],
             latency_seconds=result["latency_seconds"],
             retrieved_docs=retrieved_docs,
         )
