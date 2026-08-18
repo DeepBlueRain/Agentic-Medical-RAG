@@ -70,7 +70,6 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
     st.write("Query analysis:", result["query_analysis"])
     st.write("Search queries:", " | ".join(result["search_queries"]))
     st.write("Evidence quality:", result["evidence_quality"])
-
     st.subheader("Workflow Details")
     for index, event in enumerate(result["events"]):
         label = f"{index + 1}. {event['step']} · {event['status']}"
