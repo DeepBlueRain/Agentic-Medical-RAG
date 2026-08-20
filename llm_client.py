@@ -37,7 +37,10 @@ def chat_completion(messages, temperature=TEMPERATURE, top_p=TOP_P, max_tokens=M
         response = requests.post(url, json=payload, headers=headers, timeout=ONLINE_LLM_TIMEOUT)
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"].strip()
+        if not content:
+            raise OnlineLLMError("Online LLM returned empty content")
+        return content
     except requests.RequestException as exc:
         raise OnlineLLMError(f"Online LLM request failed: {exc}") from exc
     except (KeyError, IndexError, TypeError) as exc:
