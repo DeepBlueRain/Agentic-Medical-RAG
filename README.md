@@ -9,8 +9,13 @@ The original RAG pipeline has been upgraded from a single retrieval-and-generati
 ```text
 user query
   -> route query
-  -> retrieve documents from Milvus Lite
+  -> analyze intent and entities
+  -> rewrite into multiple search queries
+  -> retrieve and merge documents from Milvus Lite
+  -> grade evidence quality
+  -> retry retrieval once when evidence is weak
   -> generate grounded answer with online LLM
+  -> strictly regenerate once when verification fails
   -> verify answer groundedness
   -> return answer, retrieved context, trace and latency
 ```
@@ -18,9 +23,16 @@ user query
 The workflow is implemented with LangGraph and exposes the following trace nodes:
 
 - `route_query`
+- `analyze_query`
+- `rewrite_query`
 - `retrieve_context`
+- `grade_evidence`
+- `retry_query` (bounded, evidence-driven retry)
+- `select_evidence`
 - `answer_with_context`
 - `verify_groundedness`
+- `revise_answer` (bounded, strict regeneration)
+- `finalize_response`
 
 ## Features
 
@@ -28,6 +40,8 @@ The workflow is implemented with LangGraph and exposes the following trace nodes
 - Generate embeddings with Sentence-Transformers.
 - Store and retrieve vectors through Milvus Lite with IVF_FLAT indexing.
 - Use a LangGraph workflow to route, retrieve, answer and verify each query.
+- Retry retrieval once with broader query variants when evidence is weak or missing.
+- Regenerate once with a stricter grounding prompt when answer verification fails.
 - Call an online OpenAI-compatible LLM instead of loading a local generation model.
 - Fall back to evidence-extractive responses when the online LLM is unavailable or times out.
 - Show step-by-step workflow details, retrieved documents, agent trace, groundedness label and latency in Streamlit.
@@ -136,6 +150,7 @@ retrieved_docs
 ## Implementation Highlights
 
 - Built a LangGraph Agentic RAG workflow with query routing, vector retrieval, grounded answer generation and answer verification.
+- Added a bounded feedback loop: weak evidence triggers one broader retrieval pass; unsupported answers trigger one strict regeneration pass.
 - Encapsulated Milvus Lite retrieval as an agent workflow capability and exposed trace, context and latency for debugging.
 - Replaced local generation-model loading with an OpenAI-compatible online LLM service, keeping API credentials outside the repository.
 - Designed the system for later extensions such as query rewriting, conversation memory, reranking and evaluation datasets.

@@ -44,7 +44,13 @@ class AgentState(TypedDict):
     evidence_quality: str
     selected_evidence: List[SelectedEvidence]
     answer: str
+    generation_mode: str
     groundedness: str
+    retrieval_round: int
+    max_retrieval_rounds: int
+    retry_reason: str
+    revision_count: int
+    max_revision_count: int
     trace: List[str]
     events: List[WorkflowEvent]
     latency_seconds: float
@@ -229,6 +235,53 @@ def rewrite_query(state: AgentState) -> AgentState:
     }
 
 
+def build_retry_queries(state: AgentState) -> List[str]:
+    """Build a broader second-pass query set after weak evidence."""
+    query = state["query"]
+    analysis = state["query_analysis"]
+    entities = analysis.get("entities", [])
+    intent = analysis.get("intent", "general")
+    variants = list(state.get("search_queries", []))
+    if entities:
+        variants.append(" ".join(entities) + " 相关知识 详细说明")
+    variants.append(f"{query} 相关医学知识")
+    if intent != "general":
+        variants.append(f"{query} {intent} 相关证据")
+
+    normalized = []
+    for item in variants:
+        item = normalize_query(item)
+        if item and item not in normalized:
+            normalized.append(item)
+    return normalized[:6]
+
+
+def retry_query(state: AgentState) -> AgentState:
+    search_queries = build_retry_queries(state)
+    reason = state.get("retry_reason") or "evidence_quality_below_threshold"
+    detail = (
+        f"第 {state['retrieval_round']} 轮检索证据质量为 {state['evidence_quality']}，"
+        f"触发一次受控重检索；原因={reason}，生成 {len(search_queries)} 个扩展 query。"
+    )
+    next_state = {
+        **state,
+        "search_queries": search_queries,
+        "trace": state["trace"] + ["retry_query"],
+    }
+    next_state["events"] = append_event(
+        next_state,
+        "retry_query",
+        "completed",
+        detail,
+        {
+            "reason": reason,
+            "retrieval_round": state["retrieval_round"],
+            "search_queries": search_queries,
+        },
+    )
+    return next_state
+
+
 def retrieve_context(client, embedding_model):
     def _node(state: AgentState) -> AgentState:
         started_at = time.time()
@@ -265,6 +318,7 @@ def retrieve_context(client, embedding_model):
             )
 
         retrieval_ms = round((time.time() - started_at) * 1000, 1)
+        retrieval_round = state.get("retrieval_round", 0) + 1
         documents = [
             {
                 "rank": index + 1,
@@ -289,6 +343,7 @@ def retrieve_context(client, embedding_model):
         )
         next_state = {
             **state,
+            "retrieval_round": retrieval_round,
             "retrieved_ids": [doc["id"] for doc in docs],
             "distances": [doc["distance"] for doc in docs],
             "docs": docs,
@@ -304,6 +359,7 @@ def retrieve_context(client, embedding_model):
                 "search_queries": state["search_queries"],
                 "top_k": TOP_K,
                 "hits": len(docs),
+                "retrieval_round": retrieval_round,
                 "retrieval_ms": retrieval_ms,
                 "documents": documents,
             },
@@ -336,16 +392,25 @@ def grade_evidence(state: AgentState) -> AgentState:
             f"证据质量判断为 {quality}。"
         )
 
+    retry_reason = ""
+    if quality in {"weak", "no_context"}:
+        retry_reason = f"evidence_quality={quality}"
+
     return {
         **state,
         "evidence_quality": quality,
+        "retry_reason": retry_reason,
         "trace": state["trace"] + ["grade_evidence"],
         "events": append_event(
             state,
             "grade_evidence",
             "completed",
             reason,
-            {"evidence_quality": quality},
+            {
+                "evidence_quality": quality,
+                "retry_reason": retry_reason,
+                "retrieval_round": state.get("retrieval_round", 0),
+            },
         ),
     }
 
@@ -447,6 +512,7 @@ def answer_with_context(state: AgentState) -> AgentState:
     next_state = {
         **state,
         "answer": answer,
+        "generation_mode": generation_mode,
         "trace": state["trace"] + ["answer_with_context"],
     }
     next_state["events"] = append_event(
@@ -463,6 +529,65 @@ def answer_with_context(state: AgentState) -> AgentState:
             "generation_mode": generation_mode,
             "generation_error": generation_error[:200],
             "answer_chars": len(answer),
+        },
+    )
+    return next_state
+
+
+def revise_answer(state: AgentState) -> AgentState:
+    """Regenerate once with a stricter grounding instruction after failed verification."""
+    started_at = time.time()
+    answer_docs = [
+        {
+            "id": item["doc_id"],
+            "title": item["title"],
+            "content": f"[文档ID: {item['doc_id']}] {item['title']}\n{item['snippet']}",
+        }
+        for item in state["selected_evidence"]
+    ]
+    generation_error = ""
+    generation_mode = "strict_online_llm"
+    try:
+        answer = generate_answer(
+            state["query"],
+            answer_docs,
+            query_analysis=state["query_analysis"],
+            evidence_quality=state["evidence_quality"],
+            strict=True,
+        )
+    except Exception as exc:
+        generation_mode = "extractive_fallback_after_verification"
+        generation_error = str(exc)
+        answer = build_extractive_fallback_answer(
+            state["query"],
+            state["selected_evidence"],
+            state["evidence_quality"],
+            generation_error,
+        )
+
+    revision_count = state.get("revision_count", 0) + 1
+    revision_ms = round((time.time() - started_at) * 1000, 1)
+    detail = (
+        f"回答依据校验未通过，执行第 {revision_count} 次严格重生成，"
+        f"模式={generation_mode}，耗时 {revision_ms} ms。"
+    )
+    next_state = {
+        **state,
+        "answer": answer,
+        "generation_mode": generation_mode,
+        "revision_count": revision_count,
+        "trace": state["trace"] + ["revise_answer"],
+    }
+    next_state["events"] = append_event(
+        next_state,
+        "revise_answer",
+        "completed",
+        detail,
+        {
+            "revision_count": revision_count,
+            "generation_mode": generation_mode,
+            "generation_error": generation_error[:200],
+            "revision_ms": revision_ms,
         },
     )
     return next_state
@@ -589,16 +714,36 @@ def decide_route(state: AgentState) -> Literal["clarify", "analyze"]:
     return "clarify" if state["route"] == "clarify" else "analyze"
 
 
+def decide_after_grade(state: AgentState) -> Literal["retry", "select"]:
+    should_retry = (
+        state["evidence_quality"] in {"weak", "no_context"}
+        and state.get("retrieval_round", 0) < state.get("max_retrieval_rounds", 2)
+    )
+    return "retry" if should_retry else "select"
+
+
+def decide_after_verify(state: AgentState) -> Literal["revise", "finalize"]:
+    needs_revision = (
+        state.get("groundedness") in {"依据不足", "无法判断", "no_context"}
+        and bool(state.get("docs"))
+        and state.get("generation_mode") == "online_llm"
+        and state.get("revision_count", 0) < state.get("max_revision_count", 1)
+    )
+    return "revise" if needs_revision else "finalize"
+
+
 def build_agentic_rag_graph(client, embedding_model):
     graph = StateGraph(AgentState)
     graph.add_node("route_query", route_query)
     graph.add_node("clarify", clarify)
     graph.add_node("analyze", analyze_query)
     graph.add_node("rewrite", rewrite_query)
+    graph.add_node("retry_query", retry_query)
     graph.add_node("retrieve", retrieve_context(client, embedding_model))
     graph.add_node("grade", grade_evidence)
     graph.add_node("select", select_evidence)
     graph.add_node("answer", answer_with_context)
+    graph.add_node("revise_answer", revise_answer)
     graph.add_node("verify", verify_groundedness)
     graph.add_node("finalize", finalize_response)
 
@@ -612,10 +757,20 @@ def build_agentic_rag_graph(client, embedding_model):
     graph.add_edge("analyze", "rewrite")
     graph.add_edge("rewrite", "retrieve")
     graph.add_edge("retrieve", "grade")
-    graph.add_edge("grade", "select")
+    graph.add_conditional_edges(
+        "grade",
+        decide_after_grade,
+        {"retry": "retry_query", "select": "select"},
+    )
+    graph.add_edge("retry_query", "retrieve")
     graph.add_edge("select", "answer")
     graph.add_edge("answer", "verify")
-    graph.add_edge("verify", "finalize")
+    graph.add_conditional_edges(
+        "verify",
+        decide_after_verify,
+        {"revise": "revise_answer", "finalize": "finalize"},
+    )
+    graph.add_edge("revise_answer", "verify")
     graph.add_edge("finalize", END)
     return graph.compile()
 
@@ -635,7 +790,13 @@ def run_agentic_rag(query, client, embedding_model):
             "evidence_quality": "",
             "selected_evidence": [],
             "answer": "",
+            "generation_mode": "",
             "groundedness": "",
+            "retrieval_round": 0,
+            "max_retrieval_rounds": 2,
+            "retry_reason": "",
+            "revision_count": 0,
+            "max_revision_count": 1,
             "trace": [],
             "events": [],
             "latency_seconds": 0.0,

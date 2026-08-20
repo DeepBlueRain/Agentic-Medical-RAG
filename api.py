@@ -46,6 +46,10 @@ class AskResponse(BaseModel):
     query_analysis: Dict[str, Any]
     search_queries: List[str]
     evidence_quality: str
+    generation_mode: str
+    retrieval_round: int
+    retry_reason: str
+    revision_count: int
     selected_evidence: List[Dict[str, Any]]
     latency_seconds: float
     retrieved_docs: List[RetrievedDoc]
@@ -112,6 +116,10 @@ def ask(payload: AskRequest):
             query_analysis=result["query_analysis"],
             search_queries=result["search_queries"],
             evidence_quality=result["evidence_quality"],
+            generation_mode=result["generation_mode"],
+            retrieval_round=result["retrieval_round"],
+            retry_reason=result["retry_reason"],
+            revision_count=result["revision_count"],
             selected_evidence=result["selected_evidence"],
             latency_seconds=result["latency_seconds"],
             retrieved_docs=retrieved_docs,

@@ -63,6 +63,15 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
     col1.metric("Groundedness", result["groundedness"])
     col2.metric("Latency", f"{result['latency_seconds']:.2f}s")
 
+    st.write(
+        {
+            "generation_mode": result["generation_mode"],
+            "retrieval_round": result["retrieval_round"],
+            "retry_reason": result["retry_reason"],
+            "revision_count": result["revision_count"],
+        }
+    )
+
     st.subheader("Agent Trace")
     st.code(" -> ".join(result["trace"]))
 
