@@ -37,6 +37,10 @@ class AgentState(TypedDict):
     query: str
     route: str
     query_analysis: Dict[str, Any]
+    query_complexity: str
+    sub_questions: List[str]
+    tool_plan: List[Dict[str, Any]]
+    tool_calls: List[Dict[str, Any]]
     search_queries: List[str]
     retrieved_ids: List[int]
     distances: List[float]
@@ -110,6 +114,23 @@ def infer_intent(query: str) -> str:
     return "general"
 
 
+def infer_intents(query: str) -> List[str]:
+    intents = []
+    for intent, words in INTENT_RULES:
+        if any(word in query for word in words):
+            intents.append(intent)
+    return intents or ["general"]
+
+
+def detect_query_complexity(query: str, intents: List[str]) -> str:
+    # Only use explicit compound markers here; generic conjunctions such as "和/与"
+    # also appear in ordinary single-intent questions.
+    compound_markers = ("并且", "同时", "以及", "另外", "还要", "此外")
+    has_multiple_intents = len(set(intents)) >= 2
+    has_compound_marker = any(marker in query for marker in compound_markers)
+    return "compound" if has_multiple_intents or has_compound_marker else "simple"
+
+
 def detect_entities(query: str) -> List[str]:
     entities = [word for word in MEDICAL_KEYWORDS if word in query]
     if "发烧" in entities and "发热" not in entities:
@@ -118,7 +139,8 @@ def detect_entities(query: str) -> List[str]:
 
 
 def build_query_variants(query: str, analysis: Dict[str, Any]) -> List[str]:
-    variants = [query]
+    sub_questions = analysis.get("sub_questions", [])
+    variants = list(sub_questions) if sub_questions else [query]
     entities = analysis.get("entities", [])
     intent = analysis.get("intent", "general")
 
@@ -140,6 +162,17 @@ def build_query_variants(query: str, analysis: Dict[str, Any]) -> List[str]:
         if item and item not in normalized:
             normalized.append(item)
     return normalized[:4]
+
+
+def append_tool_call(state: AgentState, tool: str, status: str, detail: str, data=None):
+    return state["tool_calls"] + [
+        {
+            "tool": tool,
+            "status": status,
+            "detail": detail,
+            "data": data or {},
+        }
+    ]
 
 
 def route_query(state: AgentState) -> AgentState:
@@ -190,10 +223,14 @@ def clarify(state: AgentState) -> AgentState:
 def analyze_query(state: AgentState) -> AgentState:
     query = state["query"]
     entities = detect_entities(query)
-    intent = infer_intent(query)
+    intents = infer_intents(query)
+    intent = intents[0]
+    complexity = detect_query_complexity(query, intents)
     analysis = {
         "intent": intent,
+        "intents": intents,
         "entities": entities,
+        "complexity": complexity,
         "needs_retrieval": True,
         "risk_control": "medical_answer_must_be_grounded",
     }
@@ -215,24 +252,142 @@ def analyze_query(state: AgentState) -> AgentState:
     }
 
 
+def build_sub_questions(query: str, intents: List[str], complexity: str) -> List[str]:
+    """Split a compound request into bounded retrieval tasks."""
+    if complexity != "compound":
+        return [query]
+
+    suffixes = {
+        "cause": "原因和机制",
+        "care": "注意事项和护理",
+        "diagnosis": "检查和判断方法",
+        "treatment": "治疗和控制方式",
+        "symptom": "常见症状和表现",
+        "general": "相关基础知识",
+    }
+    questions = []
+    for intent in intents[:3]:
+        suffix = suffixes.get(intent, suffixes["general"])
+        questions.append(f"{query}，重点说明{suffix}")
+    return list(dict.fromkeys(questions)) or [query]
+
+
+def plan_tools(state: AgentState) -> AgentState:
+    analysis = state["query_analysis"]
+    complexity = analysis.get("complexity", "simple")
+    intents = analysis.get("intents", [analysis.get("intent", "general")])
+    sub_questions = build_sub_questions(state["query"], intents, complexity)
+
+    tool_plan = [
+        {
+            "tool": "query_rewriter",
+            "purpose": "根据问题意图和证据反馈生成检索 query",
+            "input": "user_query_and_analysis",
+        },
+        {
+            "tool": "medical_retriever",
+            "purpose": "从 Milvus Lite 医学知识库召回相关证据",
+            "input": "sub_questions",
+        },
+        {
+            "tool": "evidence_grader",
+            "purpose": "根据距离和实体命中情况判断证据质量",
+            "input": "retrieved_documents",
+        },
+        {
+            "tool": "groundedness_verifier",
+            "purpose": "检查生成答案是否被召回证据支持",
+            "input": "answer_and_evidence",
+        },
+        {
+            "tool": "answer_generator",
+            "purpose": "根据选定证据生成受约束的医学回答",
+            "input": "query_and_selected_evidence",
+        },
+        {
+            "tool": "answer_revision",
+            "purpose": "在回答依据不足时进行一次严格修订",
+            "input": "answer_and_verification_result",
+        },
+    ]
+    if complexity == "compound":
+        tool_plan.insert(
+            0,
+            {
+                "tool": "question_decomposer",
+                "purpose": "将复合问题拆成多个可检索子问题",
+                "input": "user_query",
+            },
+        )
+
+    detail = (
+        f"工具规划完成：问题复杂度={complexity}，规划 {len(tool_plan)} 个工具，"
+        f"拆分得到 {len(sub_questions)} 个子问题。"
+    )
+    next_analysis = {
+        **analysis,
+        "sub_questions": sub_questions,
+        "tool_plan": tool_plan,
+    }
+    next_state = {
+        **state,
+        "query_analysis": next_analysis,
+        "query_complexity": complexity,
+        "sub_questions": sub_questions,
+        "tool_plan": tool_plan,
+        "tool_calls": append_tool_call(
+            state,
+            "question_decomposer" if complexity == "compound" else "question_planner",
+            "completed",
+            detail,
+            {
+                "complexity": complexity,
+                "sub_questions": sub_questions,
+                "tool_plan": tool_plan,
+            },
+        ),
+        "trace": state["trace"] + ["plan_tools"],
+    }
+    next_state["events"] = append_event(
+        next_state,
+        "plan_tools",
+        "completed",
+        detail,
+        {
+            "complexity": complexity,
+            "sub_questions": sub_questions,
+            "tool_plan": tool_plan,
+        },
+    )
+    return next_state
+
+
 def rewrite_query(state: AgentState) -> AgentState:
     search_queries = build_query_variants(state["query"], state["query_analysis"])
     detail = (
         f"根据识别出的实体和意图生成 {len(search_queries)} 个检索 query，"
         "用于提升召回覆盖率。"
     )
-    return {
+    next_state = {
         **state,
         "search_queries": search_queries,
-        "trace": state["trace"] + ["rewrite_query"],
-        "events": append_event(
+        "tool_calls": append_tool_call(
             state,
+            "query_rewriter",
+            "completed",
+            f"根据问题分析生成 {len(search_queries)} 个初始检索 query",
+            {"search_queries": search_queries},
+        ),
+        "trace": state["trace"] + ["rewrite_query"],
+    }
+    next_state["events"] = append_event(
+            next_state,
             "rewrite_query",
             "completed",
             detail,
             {"search_queries": search_queries},
-        ),
-    }
+        )
+    return next_state
 
 
 def build_retry_queries(state: AgentState) -> List[str]:
@@ -266,6 +421,17 @@ def retry_query(state: AgentState) -> AgentState:
     next_state = {
         **state,
         "search_queries": search_queries,
+        "tool_calls": append_tool_call(
+            state,
+            "query_rewriter",
+            "completed",
+            f"证据不足，生成 {len(search_queries)} 个扩展检索 query",
+            {
+                "reason": reason,
+                "retrieval_round": state["retrieval_round"],
+                "search_queries": search_queries,
+            },
+        ),
         "trace": state["trace"] + ["retry_query"],
     }
     next_state["events"] = append_event(
@@ -347,6 +513,17 @@ def retrieve_context(client, embedding_model):
             "retrieved_ids": [doc["id"] for doc in docs],
             "distances": [doc["distance"] for doc in docs],
             "docs": docs,
+            "tool_calls": append_tool_call(
+                state,
+                "medical_retriever",
+                "completed",
+                f"第 {retrieval_round} 轮执行医学知识库检索",
+                {
+                    "queries": state["search_queries"],
+                    "hits": len(docs),
+                    "retrieval_round": retrieval_round,
+                },
+            ),
             "trace": state["trace"] + [f"retrieve_context(queries={len(state['search_queries'])}, hits={len(docs)})"],
         }
         next_state["events"] = append_event(
@@ -400,6 +577,17 @@ def grade_evidence(state: AgentState) -> AgentState:
         **state,
         "evidence_quality": quality,
         "retry_reason": retry_reason,
+        "tool_calls": append_tool_call(
+            state,
+            "evidence_grader",
+            "completed",
+            f"证据分级完成：{quality}",
+            {
+                "evidence_quality": quality,
+                "retry_required": bool(retry_reason),
+                "retrieval_round": state.get("retrieval_round", 0),
+            },
+        ),
         "trace": state["trace"] + ["grade_evidence"],
         "events": append_event(
             state,
@@ -432,6 +620,13 @@ def select_evidence(state: AgentState) -> AgentState:
     return {
         **state,
         "selected_evidence": selected,
+        "tool_calls": append_tool_call(
+            state,
+            "evidence_selector",
+            "completed",
+            f"从召回结果中整理 {len(selected)} 条证据片段",
+            {"selected_count": len(selected)},
+        ),
         "trace": state["trace"] + ["select_evidence"],
         "events": append_event(
             state,
@@ -513,6 +708,16 @@ def answer_with_context(state: AgentState) -> AgentState:
         **state,
         "answer": answer,
         "generation_mode": generation_mode,
+        "tool_calls": append_tool_call(
+            state,
+            "answer_generator",
+            "completed",
+            f"使用 {generation_mode} 生成回答",
+            {
+                "context_documents": len(state["docs"]),
+                "answer_chars": len(answer),
+            },
+        ),
         "trace": state["trace"] + ["answer_with_context"],
     }
     next_state["events"] = append_event(
@@ -576,6 +781,13 @@ def revise_answer(state: AgentState) -> AgentState:
         "answer": answer,
         "generation_mode": generation_mode,
         "revision_count": revision_count,
+        "tool_calls": append_tool_call(
+            state,
+            "answer_revision",
+            "completed",
+            f"完成第 {revision_count} 次严格回答修订",
+            {"generation_mode": generation_mode, "revision_count": revision_count},
+        ),
         "trace": state["trace"] + ["revise_answer"],
     }
     next_state["events"] = append_event(
@@ -673,6 +885,16 @@ def verify_groundedness(state: AgentState) -> AgentState:
     next_state = {
         **state,
         "groundedness": groundedness,
+        "tool_calls": append_tool_call(
+            state,
+            "groundedness_verifier",
+            "completed",
+            f"完成回答依据校验：{groundedness}",
+            {
+                "groundedness": groundedness,
+                "evaluation_called": data.get("evaluation_called", False),
+            },
+        ),
         "trace": state["trace"] + ["verify_groundedness"],
     }
     next_state["events"] = append_event(
@@ -737,6 +959,7 @@ def build_agentic_rag_graph(client, embedding_model):
     graph.add_node("route_query", route_query)
     graph.add_node("clarify", clarify)
     graph.add_node("analyze", analyze_query)
+    graph.add_node("plan_tools", plan_tools)
     graph.add_node("rewrite", rewrite_query)
     graph.add_node("retry_query", retry_query)
     graph.add_node("retrieve", retrieve_context(client, embedding_model))
@@ -754,7 +977,8 @@ def build_agentic_rag_graph(client, embedding_model):
         {"clarify": "clarify", "analyze": "analyze"},
     )
     graph.add_edge("clarify", "finalize")
-    graph.add_edge("analyze", "rewrite")
+    graph.add_edge("analyze", "plan_tools")
+    graph.add_edge("plan_tools", "rewrite")
     graph.add_edge("rewrite", "retrieve")
     graph.add_edge("retrieve", "grade")
     graph.add_conditional_edges(
@@ -783,6 +1007,10 @@ def run_agentic_rag(query, client, embedding_model):
             "query": query,
             "route": "",
             "query_analysis": {},
+            "query_complexity": "",
+            "sub_questions": [],
+            "tool_plan": [],
+            "tool_calls": [],
             "search_queries": [],
             "retrieved_ids": [],
             "distances": [],

@@ -65,6 +65,10 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
 
     st.write(
         {
+            "query_complexity": result["query_complexity"],
+            "sub_questions": result["sub_questions"],
+            "tool_plan": result["tool_plan"],
+            "tool_calls": len(result["tool_calls"]),
             "generation_mode": result["generation_mode"],
             "retrieval_round": result["retrieval_round"],
             "retry_reason": result["retry_reason"],
@@ -75,8 +79,20 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
     st.subheader("Agent Trace")
     st.code(" -> ".join(result["trace"]))
 
+    st.subheader("Agent Tool Plan")
+    st.json(result["tool_plan"])
+
+    st.subheader("Tool Calls")
+    for index, call in enumerate(result["tool_calls"]):
+        with st.expander(f"{index + 1}. {call['tool']} - {call['status']}", expanded=True):
+            st.write(call["detail"])
+            if call["data"]:
+                st.json(call["data"])
+
     st.subheader("Retrieved Context")
     st.write("Query analysis:", result["query_analysis"])
+    st.write("Query complexity:", result["query_complexity"])
+    st.write("Sub-questions:", result["sub_questions"])
     st.write("Search queries:", " | ".join(result["search_queries"]))
     st.write("Evidence quality:", result["evidence_quality"])
     st.subheader("Workflow Details")

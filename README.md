@@ -10,6 +10,8 @@ The original RAG pipeline has been upgraded from a single retrieval-and-generati
 user query
   -> route query
   -> analyze intent and entities
+  -> plan tools and query complexity
+  -> decompose compound question when needed
   -> rewrite into multiple search queries
   -> retrieve and merge documents from Milvus Lite
   -> grade evidence quality
@@ -24,6 +26,7 @@ The workflow is implemented with LangGraph and exposes the following trace nodes
 
 - `route_query`
 - `analyze_query`
+- `plan_tools`
 - `rewrite_query`
 - `retrieve_context`
 - `grade_evidence`
@@ -40,6 +43,9 @@ The workflow is implemented with LangGraph and exposes the following trace nodes
 - Generate embeddings with Sentence-Transformers.
 - Store and retrieve vectors through Milvus Lite with IVF_FLAT indexing.
 - Use a LangGraph workflow to route, retrieve, answer and verify each query.
+- Plan internal tools for question decomposition, medical retrieval, evidence grading and groundedness verification.
+- Detect compound questions and split them into bounded retrieval sub-questions.
+- Record tool plans and tool calls for workflow inspection and debugging.
 - Retry retrieval once with broader query variants when evidence is weak or missing.
 - Regenerate once with a stricter grounding prompt when answer verification fails.
 - Call an online OpenAI-compatible LLM instead of loading a local generation model.
@@ -140,6 +146,10 @@ trace
 workflow_events
 route
 query_analysis
+query_complexity
+sub_questions
+tool_plan
+tool_calls
 search_queries
 evidence_quality
 selected_evidence

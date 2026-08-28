@@ -44,6 +44,10 @@ class AskResponse(BaseModel):
     workflow_events: List[WorkflowEvent]
     route: str
     query_analysis: Dict[str, Any]
+    query_complexity: str
+    sub_questions: List[str]
+    tool_plan: List[Dict[str, Any]]
+    tool_calls: List[Dict[str, Any]]
     search_queries: List[str]
     evidence_quality: str
     generation_mode: str
@@ -114,6 +118,10 @@ def ask(payload: AskRequest):
             workflow_events=result["events"],
             route=result["route"],
             query_analysis=result["query_analysis"],
+            query_complexity=result["query_complexity"],
+            sub_questions=result["sub_questions"],
+            tool_plan=result["tool_plan"],
+            tool_calls=result["tool_calls"],
             search_queries=result["search_queries"],
             evidence_quality=result["evidence_quality"],
             generation_mode=result["generation_mode"],
