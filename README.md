@@ -1,95 +1,58 @@
 # Agentic Medical RAG
 
-An agentic RAG assistant for medical science articles. The project combines local document retrieval with an online OpenAI-compatible LLM and exposes the workflow through Streamlit and FastAPI.
+一个面向医学科普文章的 RAG 问答项目。它使用本地 embedding 和 Milvus Lite 做文档检索，使用在线 OpenAI-compatible 模型生成中文回答；LangGraph 负责把查询分析、检索、证据判断、回答和校验串成一个可观察的工作流。
 
-## What Changed
-
-The original RAG pipeline has been upgraded from a single retrieval-and-generation flow to an Agentic RAG workflow:
+## 工作流
 
 ```text
-user query
-  -> route query
-  -> analyze intent and entities
-  -> plan tools and query complexity
-  -> decompose compound question when needed
-  -> rewrite into multiple search queries
-  -> retrieve and merge documents from Milvus Lite
-  -> grade evidence quality
-  -> retry retrieval once when evidence is weak
-  -> generate grounded answer with online LLM
-  -> strictly regenerate once when verification fails
-  -> verify answer groundedness
-  -> return answer, retrieved context, trace and latency
+用户问题
+  -> 路由与意图分析
+  -> 复合问题拆分（必要时）
+  -> 生成多个检索 query
+  -> dense 检索 + 本地关键词检索
+  -> Reciprocal Rank Fusion 合并排序
+  -> 证据质量判断
+  -> 证据不足时扩展 query 并补检索一次
+  -> 基于证据生成回答
+  -> 在线模型依据校验
+  -> 校验失败时严格重生成一次
+  -> 返回答案、证据和完整 trace
 ```
 
-The workflow is implemented with LangGraph and exposes the following trace nodes:
+这里的 Agent 不是让模型随意调用工具，而是把每个能力做成 LangGraph 节点，通过状态和条件边控制执行路径。比如证据质量为 `weak` 或 `no_context` 时，图会回到 `retry_query`，最多补检索一次；答案依据不足时进入 `revise_answer`，最多严格重生成一次。
 
-- `route_query`
-- `analyze_query`
-- `plan_tools`
-- `rewrite_query`
-- `retrieve_context`
-- `grade_evidence`
-- `retry_query` (bounded, evidence-driven retry)
-- `select_evidence`
-- `answer_with_context`
-- `verify_groundedness`
-- `revise_answer` (bounded, strict regeneration)
-- `finalize_response`
+## 主要功能
 
-## Features
+- 使用 BeautifulSoup 解析并切分医学 HTML 文档。
+- 使用 Sentence-Transformers 生成 384 维 embedding，Milvus Lite 保存向量并完成 dense 检索。
+- 使用不依赖额外服务的本地 BM25 风格关键词检索，标题命中会加权。
+- 对多个改写 query 的 dense/关键词结果按各自排名做 RRF 融合，并保留检索来源、排名、匹配 query 和分数。
+- 根据证据距离、实体命中和关键词命中情况进行证据分级。
+- 在线模型调用失败时有限重试并指数退避；仍失败时切换到只摘录召回证据的 fallback。
+- Streamlit 展示工作流节点、工具调用、检索来源、证据分数和延迟。
+- FastAPI `/ask` 接口返回答案、工作流事件和检索证据，方便调试与后续评测。
 
-- Parse and chunk medical HTML documents with BeautifulSoup.
-- Generate embeddings with Sentence-Transformers.
-- Store and retrieve vectors through Milvus Lite with IVF_FLAT indexing.
-- Use a LangGraph workflow to route, retrieve, answer and verify each query.
-- Plan internal tools for question decomposition, medical retrieval, evidence grading and groundedness verification.
-- Detect compound questions and split them into bounded retrieval sub-questions.
-- Record tool plans and tool calls for workflow inspection and debugging.
-- Retry retrieval once with broader query variants when evidence is weak or missing.
-- Regenerate once with a stricter grounding prompt when answer verification fails.
-- Call an online OpenAI-compatible LLM instead of loading a local generation model.
-- Fall back to evidence-extractive responses when the online LLM is unavailable or times out.
-- Show step-by-step workflow details, retrieved documents, agent trace, groundedness label and latency in Streamlit.
-- Provide an API endpoint for integration and evaluation.
+## 技术栈
 
-## Tech Stack
+Python、LangGraph、FastAPI、Streamlit、Milvus Lite、Sentence-Transformers、BeautifulSoup、OpenAI-compatible API。
 
-- Python
-- LangGraph
-- FastAPI
-- Streamlit
-- Milvus Lite
-- Sentence-Transformers
-- OpenAI-compatible online LLM API
-- BeautifulSoup / lxml
-
-## Project Structure
+## 目录说明
 
 ```text
-.
-├── agentic_rag.py     # LangGraph workflow and trace collection
-├── api.py             # FastAPI service
-├── app.py             # Streamlit demo UI
-├── config.py          # Data, Milvus and online LLM configuration
-├── llm_client.py      # OpenAI-compatible chat completion client
-├── milvus_utils.py    # Milvus Lite indexing and retrieval
-├── models.py          # Embedding model loader
-├── preprocess.py      # HTML parsing and chunking
-├── rag_core.py        # Grounded answer prompt and generation
-├── requirements.txt
-└── .env.example
+agentic_rag.py       LangGraph 状态、节点和条件分支
+lexical_retriever.py 本地关键词检索和多 query 结果合并
+milvus_utils.py      Milvus Lite 初始化、建库和 dense 检索
+llm_client.py        在线模型请求、重试和响应解析
+rag_core.py          受证据约束的回答 prompt
+app.py               Streamlit 演示页面
+api.py               FastAPI 接口
+preprocess.py        HTML 解析和文本切分
+config.py            路径、检索和模型配置
 ```
 
-## Setup
+## 配置
 
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Create a local `.env` file from `.env.example`:
+复制 `.env.example` 为 `.env`，填写在线模型配置：
 
 ```dotenv
 ONLINE_LLM_BASE_URL=https://apihub.agnes-ai.com/v1
@@ -97,70 +60,47 @@ ONLINE_LLM_API_KEY=your-api-key
 ONLINE_LLM_MODEL=agnes-2.5-flash
 ```
 
-Do not commit `.env`. It is ignored by `.gitignore`.
+不要把 `.env` 或 API Key 提交到 Git。embedding 模型可以通过 `EMBEDDING_MODEL_NAME` 指向本地目录，例如：
 
-## Data Preparation
-
-Put raw HTML files under `data/`, then run:
-
-```bash
-python preprocess.py
+```dotenv
+EMBEDDING_MODEL_NAME=G:/shujuwajue/model/all-MiniLM-L6-v2
 ```
 
-This generates `data/processed_data.json` for vector indexing. Large raw data, vector database files, caches and logs are intentionally excluded from the repository.
+默认数据文件为 `data/processed_data.json`，Milvus Lite 数据库为 `data/medical_rag.db`。这两个文件都被 `.gitignore` 排除；公开仓库只保留代码和配置示例。
 
-## Run Streamlit
+## 运行
+
+在项目目录使用已经配置好依赖的 Python 环境执行：
 
 ```bash
 streamlit run app.py
 ```
 
-The page displays the answer, retrieved context, workflow trace, groundedness label and latency.
-
-## Run API
+或者启动 API：
 
 ```bash
 uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-Health check:
+健康检查：
 
-```bash
-curl http://127.0.0.1:8000/health
+```text
+GET http://127.0.0.1:8000/health
 ```
 
-Ask a question:
+请求示例：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
-  -d '{"query":"白血病患者化疗后需要注意什么？"}'
+  -d '{"query":"白血病为什么会发烧？"}'
 ```
 
-Example response fields:
+## 面试时可以说明的工程点
 
-```text
-answer
-groundedness
-trace
-workflow_events
-route
-query_analysis
-query_complexity
-sub_questions
-tool_plan
-tool_calls
-search_queries
-evidence_quality
-selected_evidence
-latency_seconds
-retrieved_docs
-```
+- 纯向量检索对医学实体和固定术语不一定稳定，因此增加关键词检索，并使用 RRF 融合两路结果。
+- Agent 的核心在于状态流转和条件分支，而不是节点数量；证据不足会触发受控补检索，回答校验失败会触发一次严格重生成。
+- 每一步都记录输入摘要、输出结果和耗时，页面可以直接查看 query 改写、检索来源、证据质量和最终回答。
+- 在线模型只负责生成和校验，embedding、向量库和检索逻辑留在本地，便于复现和替换模型服务。
 
-## Implementation Highlights
-
-- Built a LangGraph Agentic RAG workflow with query routing, vector retrieval, grounded answer generation and answer verification.
-- Added a bounded feedback loop: weak evidence triggers one broader retrieval pass; unsupported answers trigger one strict regeneration pass.
-- Encapsulated Milvus Lite retrieval as an agent workflow capability and exposed trace, context and latency for debugging.
-- Replaced local generation-model loading with an OpenAI-compatible online LLM service, keeping API credentials outside the repository.
-- Designed the system for later extensions such as query rewriting, conversation memory, reranking and evaluation datasets.
+项目不承诺医学诊断能力，回答只用于展示基于已有科普资料的检索和生成流程。

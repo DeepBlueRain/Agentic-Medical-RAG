@@ -114,6 +114,17 @@ if st.button("Run Agentic RAG", key="submit_button") and query:
     for index, doc in enumerate(result["docs"]):
         with st.expander(f"Document {index + 1} (ID: {doc['id']}, distance: {doc['distance']:.4f}) - {doc['title'][:60]}"):
             st.write(f"**Title:** {doc['title']}")
+            st.write(
+                {
+                    "retrieval_sources": doc.get("retrieval_sources", []),
+                    "dense_rank": doc.get("dense_rank"),
+                    "lexical_rank": doc.get("lexical_rank"),
+                    "lexical_score": doc.get("lexical_score", 0.0),
+                    "rrf_score": doc.get("rrf_score", 0.0),
+                    "dense_query": doc.get("matched_query", ""),
+                    "lexical_query": doc.get("lexical_query", ""),
+                }
+            )
             st.write(f"**Content:** {doc['abstract']}")
 
 st.sidebar.header("Configuration")

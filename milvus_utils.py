@@ -134,7 +134,7 @@ def index_data_if_needed(client, data, embedding_model):
         raise RuntimeError(f"Error inserting data into Milvus Lite: {exc}") from exc
 
 
-def search_similar_documents(client, query, embedding_model):
+def search_similar_documents(client, query, embedding_model, top_k=None):
     """Search similar documents from Milvus Lite."""
     try:
         try:
@@ -145,11 +145,12 @@ def search_similar_documents(client, query, embedding_model):
         query_embedding = embedding_model.encode([query])[0]
         query_vector = query_embedding.tolist() if hasattr(query_embedding, "tolist") else query_embedding
 
+        limit = top_k or TOP_K
         search_params = {
             "collection_name": COLLECTION_NAME,
             "data": [query_vector],
             "anns_field": "embedding",
-            "limit": TOP_K,
+            "limit": limit,
             "output_fields": ["id"],
         }
 

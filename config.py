@@ -21,10 +21,16 @@ ONLINE_LLM_BASE_URL = os.getenv("ONLINE_LLM_BASE_URL", "https://apihub.agnes-ai.
 ONLINE_LLM_API_KEY = os.getenv("ONLINE_LLM_API_KEY", "")
 ONLINE_LLM_MODEL = os.getenv("ONLINE_LLM_MODEL", "agnes-2.5-flash")
 ONLINE_LLM_TIMEOUT = int(os.getenv("ONLINE_LLM_TIMEOUT", "60"))
+ONLINE_LLM_MAX_RETRIES = int(os.getenv("ONLINE_LLM_MAX_RETRIES", "2"))
+ONLINE_LLM_RETRY_BACKOFF = float(os.getenv("ONLINE_LLM_RETRY_BACKOFF", "1.5"))
 
 # Indexing and search
 MAX_ARTICLES_TO_INDEX = int(os.getenv("MAX_ARTICLES_TO_INDEX", "500"))
 TOP_K = int(os.getenv("TOP_K", "3"))
+DENSE_CANDIDATES = int(os.getenv("DENSE_CANDIDATES", "8"))
+LEXICAL_CANDIDATES = int(os.getenv("LEXICAL_CANDIDATES", "8"))
+RRF_K = int(os.getenv("RRF_K", "60"))
+HYBRID_RETRIEVAL_ENABLED = os.getenv("HYBRID_RETRIEVAL_ENABLED", "true").lower() == "true"
 INDEX_METRIC_TYPE = os.getenv("INDEX_METRIC_TYPE", "L2")
 INDEX_TYPE = os.getenv("INDEX_TYPE", "IVF_FLAT")
 INDEX_PARAMS = {"nlist": int(os.getenv("MILVUS_NLIST", "128"))}

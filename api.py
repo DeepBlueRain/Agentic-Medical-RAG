@@ -3,7 +3,7 @@ import os
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", "./hf_cache")
@@ -27,6 +27,13 @@ class RetrievedDoc(BaseModel):
     title: str
     distance: float
     abstract: str
+    retrieval_sources: List[str] = Field(default_factory=list)
+    dense_rank: int | None = None
+    lexical_rank: int | None = None
+    lexical_score: float = 0.0
+    rrf_score: float = 0.0
+    matched_query: str = ""
+    lexical_query: str = ""
 
 
 class WorkflowEvent(BaseModel):
@@ -107,6 +114,13 @@ def ask(payload: AskRequest):
                 title=doc["title"],
                 distance=doc["distance"],
                 abstract=doc["abstract"],
+                retrieval_sources=doc.get("retrieval_sources", []),
+                dense_rank=doc.get("dense_rank"),
+                lexical_rank=doc.get("lexical_rank"),
+                lexical_score=doc.get("lexical_score", 0.0),
+                rrf_score=doc.get("rrf_score", 0.0),
+                matched_query=doc.get("matched_query", ""),
+                lexical_query=doc.get("lexical_query", ""),
             )
             for doc in result["docs"]
         ]

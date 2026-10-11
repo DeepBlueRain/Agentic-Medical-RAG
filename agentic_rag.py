@@ -4,8 +4,17 @@ from typing import Any, Dict, List, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from config import EMBEDDING_MODEL_NAME, TOP_K, id_to_doc_map
+from config import (
+    DENSE_CANDIDATES,
+    EMBEDDING_MODEL_NAME,
+    HYBRID_RETRIEVAL_ENABLED,
+    LEXICAL_CANDIDATES,
+    RRF_K,
+    TOP_K,
+    id_to_doc_map,
+)
 from llm_client import chat_completion
+from lexical_retriever import merge_lexical_hits
 from milvus_utils import search_similar_documents
 from rag_core import generate_answer
 
@@ -16,6 +25,13 @@ class RetrievedDocument(TypedDict):
     distance: float
     abstract: str
     content: str
+    retrieval_sources: List[str]
+    dense_rank: int | None
+    lexical_rank: int | None
+    lexical_score: float
+    rrf_score: float
+    matched_query: str
+    lexical_query: str
 
 
 class SelectedEvidence(TypedDict):
@@ -24,6 +40,11 @@ class SelectedEvidence(TypedDict):
     title: str
     distance: float
     snippet: str
+    retrieval_sources: List[str]
+    dense_rank: int | None
+    lexical_rank: int | None
+    lexical_score: float
+    rrf_score: float
 
 
 class WorkflowEvent(TypedDict):
@@ -455,19 +476,69 @@ def retrieve_context(client, embedding_model):
 
         for search_query in state["search_queries"]:
             hit_ids, hit_distances = search_similar_documents(
-                client, search_query, embedding_model
+                client,
+                search_query,
+                embedding_model,
+                top_k=DENSE_CANDIDATES,
             )
-            for index, doc_id in enumerate(hit_ids):
-                distance = float(hit_distances[index]) if index < len(hit_distances) else 0.0
-                existing = merged.get(doc_id)
-                if existing is None or distance < existing["distance"]:
-                    merged[doc_id] = {
+            for rank, doc_id in enumerate(hit_ids, 1):
+                distance = float(hit_distances[rank - 1]) if rank <= len(hit_distances) else 0.0
+                existing = merged.setdefault(
+                    doc_id,
+                    {
                         "doc_id": doc_id,
                         "distance": distance,
                         "matched_query": search_query,
-                    }
+                        "dense_ranks": [],
+                    },
+                )
+                existing["dense_ranks"].append(rank)
+                if distance < existing["distance"]:
+                    existing["distance"] = distance
+                    existing["matched_query"] = search_query
 
-        ranked_hits = sorted(merged.values(), key=lambda item: item["distance"])[:TOP_K]
+        lexical_hits = {}
+        if HYBRID_RETRIEVAL_ENABLED:
+            lexical_hits = merge_lexical_hits(
+                state["search_queries"],
+                id_to_doc_map,
+                top_k=LEXICAL_CANDIDATES,
+            )
+            for doc_id, hit in lexical_hits.items():
+                merged.setdefault(
+                    doc_id,
+                    {
+                        "doc_id": doc_id,
+                        "distance": 999.0,
+                        "matched_query": "",
+                        "dense_ranks": [],
+                    },
+                )
+                merged[doc_id]["lexical_score"] = hit["score"]
+                merged[doc_id]["lexical_rank"] = hit["rank"]
+                merged[doc_id]["lexical_query"] = hit["matched_query"]
+                merged[doc_id]["lexical_ranks"] = hit.get("ranks", [hit["rank"]])
+                merged[doc_id]["lexical_queries"] = hit.get(
+                    "matched_queries", [hit["matched_query"]]
+                )
+
+        for hit in merged.values():
+            dense_ranks = hit.get("dense_ranks", [])
+            lexical_ranks = hit.get("lexical_ranks", [])
+            rrf_score = sum(1 / (RRF_K + rank) for rank in dense_ranks)
+            rrf_score += sum(1 / (RRF_K + rank) for rank in lexical_ranks)
+            hit["dense_rank"] = min(dense_ranks) if dense_ranks else None
+            hit["lexical_rank"] = min(lexical_ranks) if lexical_ranks else None
+            hit["rrf_score"] = rrf_score
+
+        ranked_hits = sorted(
+            merged.values(),
+            key=lambda item: (
+                item.get("rrf_score", 0.0),
+                -item.get("distance", 999.0),
+            ),
+            reverse=True,
+        )[:TOP_K]
         docs = []
         for hit in ranked_hits:
             doc = id_to_doc_map.get(hit["doc_id"])
@@ -480,6 +551,18 @@ def retrieve_context(client, embedding_model):
                     "distance": hit["distance"],
                     "abstract": doc.get("abstract", ""),
                     "content": doc.get("content", ""),
+                    "retrieval_sources": (
+                        ["dense"] if hit.get("dense_rank") else []
+                    )
+                    + (["lexical"] if hit.get("lexical_rank") else []),
+                    "dense_rank": hit.get("dense_rank"),
+                    "lexical_rank": hit.get("lexical_rank"),
+                    "lexical_score": round(hit.get("lexical_score", 0.0), 6),
+                    "rrf_score": round(hit.get("rrf_score", 0.0), 6),
+                    "matched_query": hit.get("matched_query", ""),
+                    "lexical_query": hit.get("lexical_query", ""),
+                    "dense_ranks": hit.get("dense_ranks", []),
+                    "lexical_ranks": hit.get("lexical_ranks", []),
                 }
             )
 
@@ -491,6 +574,19 @@ def retrieve_context(client, embedding_model):
                 "id": doc["id"],
                 "title": doc["title"],
                 "distance": round(doc["distance"], 4),
+                "retrieval_sources": doc.get("retrieval_sources", []),
+                "dense_rank": doc.get("dense_rank"),
+                "lexical_rank": doc.get("lexical_rank"),
+                "lexical_score": doc.get("lexical_score", 0.0),
+                "rrf_score": doc.get("rrf_score", 0.0),
+                "lexical_query": next(
+                    (
+                        hit.get("lexical_query", "")
+                        for hit in ranked_hits
+                        if hit["doc_id"] == doc["id"]
+                    ),
+                    "",
+                ),
                 "matched_query": next(
                     (
                         hit["matched_query"]
@@ -503,8 +599,8 @@ def retrieve_context(client, embedding_model):
             for index, doc in enumerate(docs)
         ]
         detail = (
-            f"对 {len(state['search_queries'])} 个 query 执行多路向量检索，"
-            f"合并去重后保留 Top-{TOP_K}，命中 {len(docs)} 条文档，"
+            f"对 {len(state['search_queries'])} 个 query 执行 dense 与关键词检索，"
+            f"通过 RRF 合并去重后保留 Top-{TOP_K}，命中 {len(docs)} 条文档，"
             f"耗时 {retrieval_ms} ms。"
         )
         next_state = {
@@ -535,6 +631,14 @@ def retrieve_context(client, embedding_model):
                 "embedding_model": EMBEDDING_MODEL_NAME,
                 "search_queries": state["search_queries"],
                 "top_k": TOP_K,
+                "dense_candidates": DENSE_CANDIDATES,
+                "lexical_candidates": LEXICAL_CANDIDATES,
+                "hybrid_enabled": HYBRID_RETRIEVAL_ENABLED,
+                "fusion": (
+                    "reciprocal_rank_fusion"
+                    if HYBRID_RETRIEVAL_ENABLED
+                    else "dense_only"
+                ),
                 "hits": len(docs),
                 "retrieval_round": retrieval_round,
                 "retrieval_ms": retrieval_ms,
@@ -547,20 +651,27 @@ def retrieve_context(client, embedding_model):
 
 
 def grade_evidence(state: AgentState) -> AgentState:
+    lexical_hits = 0
     if not state["docs"]:
         quality = "no_context"
         reason = "没有召回到可用文档。"
     else:
-        best_distance = min(state["distances"]) if state["distances"] else 999
+        dense_distances = [
+            distance for distance in state["distances"] if distance < 999
+        ]
+        best_distance = min(dense_distances) if dense_distances else 999
         entity_hits = sum(
             1
             for doc in state["docs"]
             for entity in state["query_analysis"].get("entities", [])
             if entity and (entity in doc["title"] or entity in doc["abstract"])
         )
-        if best_distance <= 0.75 or entity_hits >= 2:
+        lexical_hits = sum(
+            1 for doc in state["docs"] if doc.get("lexical_score", 0.0) > 0
+        )
+        if best_distance <= 0.75 or entity_hits >= 2 or lexical_hits >= 2:
             quality = "strong"
-        elif best_distance <= 0.95:
+        elif best_distance <= 0.95 or lexical_hits == 1:
             quality = "usable"
         else:
             quality = "weak"
@@ -586,6 +697,7 @@ def grade_evidence(state: AgentState) -> AgentState:
                 "evidence_quality": quality,
                 "retry_required": bool(retry_reason),
                 "retrieval_round": state.get("retrieval_round", 0),
+                "lexical_hits": lexical_hits,
             },
         ),
         "trace": state["trace"] + ["grade_evidence"],
@@ -598,6 +710,7 @@ def grade_evidence(state: AgentState) -> AgentState:
                 "evidence_quality": quality,
                 "retry_reason": retry_reason,
                 "retrieval_round": state.get("retrieval_round", 0),
+                "lexical_hits": lexical_hits,
             },
         ),
     }
@@ -613,6 +726,12 @@ def select_evidence(state: AgentState) -> AgentState:
                 "doc_id": doc["id"],
                 "title": doc["title"],
                 "distance": round(doc["distance"], 4),
+                "retrieval_sources": doc.get("retrieval_sources", []),
+                "dense_rank": doc.get("dense_rank"),
+                "lexical_rank": doc.get("lexical_rank"),
+                "lexical_score": doc.get("lexical_score", 0.0),
+                "rrf_score": doc.get("rrf_score", 0.0),
+                "lexical_query": doc.get("lexical_query", ""),
                 "snippet": snippet,
             }
         )
